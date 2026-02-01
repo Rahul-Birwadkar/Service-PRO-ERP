@@ -16,6 +16,13 @@ app.use(cors()); // tighten later for specific Netlify domain
 app.use(express.json());
 
 // -----------------------------
+// Root route (for Render / browser test)
+// -----------------------------
+app.get("/", (req, res) => {
+  res.send("Service Pro ERP Backend Running 🚀");
+});
+
+// -----------------------------
 // Health check
 // -----------------------------
 app.get("/health", async (req, res) => {
@@ -917,7 +924,8 @@ app.post("/api/inventory-items", async (req, res) => {
 
 // POST /api/inventory/stock-movement  -> in/out movement
 app.post("/api/inventory/stock-movement", async (req, res) => {
-  const client = await db.query("select 1"); // dummy to ensure pool ready
+  // small dummy query to ensure pool ready (ok)
+  await db.query("select 1");
   try {
     const { item_id, direction, quantity, job_id, note } = req.body || {};
 
