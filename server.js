@@ -5,6 +5,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const db = require("./db");
+const bcrypt = require("bcryptjs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -2026,6 +2027,23 @@ app.post("/api/login", async (req, res) => {
   } catch (err) {
     console.error("POST /api/login error:", err);
     res.status(500).json({ error: "Login failed due to server error" });
+  }
+});
+
+
+// TEMP: password hash helper (remove after use)
+app.post("/api/util/hash", async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password) {
+      return res.status(400).json({ error: "Password is required" });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+    res.json({ hash });
+  } catch (err) {
+    console.error("Hash helper error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
