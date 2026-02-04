@@ -1970,14 +1970,77 @@ app.get("/api/reports/summary", async (req, res) => {
 // AUTH / LOGIN (email-based using erp_users in Neon)
 // =====================================================
 
+// app.post("/api/login", async (req, res) => {
+//   try {
+//     const { email } = req.body || {};
+
+//     if (!email) {
+//       return res
+//         .status(400)
+//         .json({ error: "Email is required for login" });
+//     }
+
+//     const result = await db.query(
+//       `
+//       select
+//         id,
+//         email,
+//         full_name,
+//         role,
+//         department,
+//         allowed_modules,
+//         denied_modules,
+//         is_active,
+//         created_at,
+//         updated_at
+//       from public.erp_users
+//       where lower(email) = lower($1)
+//       limit 1
+//       `,
+//       [email.trim().toLowerCase()]
+//     );
+
+//     if (result.rowCount === 0) {
+//       return res
+//         .status(401)
+//         .json({ error: "Invalid email or account not found" });
+//     }
+
+//     const user = result.rows[0];
+
+//     if (user.is_active === false) {
+//       return res
+//         .status(403)
+//         .json({ error: "Your ERP account is inactive. Contact admin." });
+//     }
+
+//     res.json({
+//       id: user.id,
+//       email: user.email,
+//       full_name: user.full_name,
+//       role: user.role,
+//       department: user.department,
+//       allowed_modules: user.allowed_modules || [],
+//       denied_modules: user.denied_modules || [],
+//       is_active: user.is_active
+//     });
+//   } catch (err) {
+//     console.error("POST /api/login error:", err);
+//     res.status(500).json({ error: "Login failed due to server error" });
+//   }
+// });
+
+// =====================================================
+// AUTH / LOGIN
+// =====================================================
 app.post("/api/login", async (req, res) => {
   try {
-    const { email } = req.body || {};
+    const { email, password } = req.body;
 
-    if (!email) {
+    if (!email || !password) {
       return res
         .status(400)
-        .json({ error: "Email is required for login" });
+        .json({ error: "Email and password are required." });
     }
 
     const result = await db.query(
@@ -1991,45 +2054,42 @@ app.post("/api/login", async (req, res) => {
         allowed_modules,
         denied_modules,
         is_active,
-        created_at,
-        updated_at
+        password_hash
       from public.erp_users
-      where lower(email) = lower($1)
+      where email = $1
       limit 1
       `,
-      [email.trim().toLowerCase()]
+      [email]
     );
 
     if (result.rowCount === 0) {
-      return res
-        .status(401)
-        .json({ error: "Invalid email or account not found" });
+      return res.status(401).json({ error: "Invalid email or password." });
     }
 
     const user = result.rows[0];
 
-    if (user.is_active === false) {
-      return res
-        .status(403)
-        .json({ error: "Your ERP account is inactive. Contact admin." });
+    if (!user.is_active) {
+      return res.status(403).json({ error: "User is inactive." });
     }
 
-    res.json({
-      id: user.id,
-      email: user.email,
-      full_name: user.full_name,
-      role: user.role,
-      department: user.department,
-      allowed_modules: user.allowed_modules || [],
-      denied_modules: user.denied_modules || [],
-      is_active: user.is_active
-    });
+    if (!user.password_hash) {
+      return res.status(401).json({ error: "Invalid email or password." });
+    }
+
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) {
+      return res.status(401).json({ error: "Invalid email or password." });
+    }
+
+    // Never send hash back
+    const { password_hash, ...safeUser } = user;
+
+    res.json(safeUser);
   } catch (err) {
-    console.error("POST /api/login error:", err);
-    res.status(500).json({ error: "Login failed due to server error" });
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
-
 
 // TEMP: password hash helper (remove after use)
 app.post("/api/util/hash", async (req, res) => {
