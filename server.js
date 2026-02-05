@@ -826,6 +826,10 @@ app.patch("/api/erp-users/:id", async (req, res) => {
 // INVENTORY ROUTES (ITEMS + STOCK MOVEMENTS)
 // =====================================================
 
+// =====================================================
+// INVENTORY ROUTES (ITEMS + STOCK MOVEMENTS)
+// =====================================================
+
 // GET /api/inventory-items
 app.get("/api/inventory-items", async (req, res) => {
   try {
@@ -833,22 +837,18 @@ app.get("/api/inventory-items", async (req, res) => {
       `
       select
         id,
-        item_code,
-        name,
-        description,
+        item_code as part_number,
+        coalesce(name, description) as description,
         category,
         uom,
         current_stock,
-        min_stock,
-        reorder_point,
-        location,
-        status,
-        created_at,
-        updated_at
+        min_stock_level
       from public.inventory_items
-      order by item_code asc nulls last, name asc nulls last
+      where is_active = true
+      order by category nulls last, item_code
       `
     );
+
     res.json(result.rows);
   } catch (err) {
     console.error("GET /api/inventory-items error:", err);
@@ -856,94 +856,52 @@ app.get("/api/inventory-items", async (req, res) => {
   }
 });
 
-// POST /api/inventory-items
-app.post("/api/inventory-items", async (req, res) => {
-  try {
-    const {
-      item_code,
-      name,
-      description,
-      category,
-      uom,
-      current_stock,
-      min_stock,
-      reorder_point,
-      location,
-      status
-    } = req.body || {};
+// POST /api/inventory/usage  -> log OUT movement from usage form
+app.post("/api/inventory/usage", async (req, res) => {
+  const { item_id, job_id, quantity, note } = req.body || {};
 
-    if (!item_code || !name) {
+  try {
+    if (!item_id || !quantity) {
       return res
         .status(400)
-        .json({ error: "item_code and name are required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.inventory_items (
-        item_code,
-        name,
-        description,
-        category,
-        uom,
-        current_stock,
-        min_stock,
-        reorder_point,
-        location,
-        status
-      )
-      values (
-        $1,$2,$3,$4,$5,
-        coalesce($6,0),
-        coalesce($7,0),
-        coalesce($8,0),
-        $9,
-        coalesce($10,'active')
-      )
-      returning *
-      `,
-      [
-        item_code,
-        name,
-        description || null,
-        category || null,
-        uom || null,
-        current_stock || 0,
-        min_stock || 0,
-        reorder_point || 0,
-        location || null,
-        status || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/inventory-items error:", err);
-    res.status(500).json({ error: "Failed to create inventory item" });
-  }
-});
-
-// POST /api/inventory/stock-movement  -> in/out movement
-app.post("/api/inventory/stock-movement", async (req, res) => {
-  // small dummy query to ensure pool ready (ok)
-  await db.query("select 1");
-  try {
-    const { item_id, direction, quantity, job_id, note } = req.body || {};
-
-    if (!item_id || !direction || !quantity) {
-      return res
-        .status(400)
-        .json({ error: "item_id, direction and quantity are required" });
+        .json({ error: "item_id and quantity are required" });
     }
 
     const qty = Number(quantity);
     if (!Number.isFinite(qty) || qty <= 0) {
-      return res.status(400).json({ error: "Quantity must be > 0" });
+      return res
+        .status(400)
+        .json({ error: "Quantity must be a number > 0" });
     }
 
-    // manual transaction
+    // Make sure item exists and is active
+    const itemResult = await db.query(
+      `
+      select id, current_stock
+      from public.inventory_items
+      where id = $1 and is_active = true
+      `,
+      [item_id]
+    );
+
+    if (itemResult.rowCount === 0) {
+      return res.status(404).json({ error: "Inventory item not found" });
+    }
+
+    const currentStock = Number(itemResult.rows[0].current_stock) || 0;
+
+    // Business decision: allow negative or not
+    // For now, we allow it but log a warning
+    if (currentStock < qty) {
+      console.warn(
+        "Inventory usage would drive stock negative:",
+        { item_id, currentStock, qty }
+      );
+    }
+
     await db.query("BEGIN");
 
+    // 1) Insert stock movement (OUT)
     await db.query(
       `
       insert into public.stock_movements (
@@ -953,31 +911,31 @@ app.post("/api/inventory/stock-movement", async (req, res) => {
         job_id,
         note
       )
-      values ($1, $2::stock_direction, $3, $4, $5)
+      values ($1, 'out'::stock_direction, $2, $3, $4)
       `,
-      [item_id, direction, qty, job_id || null, note || null]
+      [item_id, qty, job_id || null, note || null]
     );
 
+    // 2) Update current stock
     await db.query(
       `
       update public.inventory_items
-      set current_stock =
-        current_stock +
-        case when $2::stock_direction = 'in' then $1 else -$1 end,
-          updated_at = now()
-      where id = $3
+      set current_stock = current_stock - $1,
+          updated_at   = now()
+      where id = $2
       `,
-      [qty, direction, item_id]
+      [qty, item_id]
     );
 
     await db.query("COMMIT");
     res.status(201).json({ success: true });
   } catch (err) {
     await db.query("ROLLBACK").catch(() => {});
-    console.error("POST /api/inventory/stock-movement error:", err);
-    res.status(500).json({ error: "Failed to record stock movement" });
+    console.error("POST /api/inventory/usage error:", err);
+    res.status(500).json({ error: "Failed to record inventory usage" });
   }
 });
+
 
 // =====================================================
 // QUOTATIONS ROUTES
