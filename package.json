@@ -1,11 +1,9 @@
 {
   "name": "service-pro-erp-backend",
   "version": "1.0.0",
-  "description": "Production backend for Service Pro ERP (Neon + Express)",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -14,9 +12,8 @@
     "express": "^4.21.2",
     "helmet": "^7.0.0",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.11.3"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.3"
+    "pg": "^8.11.3",
+    "cookie-parser": "^1.4.6",
+    "morgan": "^1.10.0"
   }
 }
