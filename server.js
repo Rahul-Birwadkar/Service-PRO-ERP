@@ -16,17 +16,23 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
-const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
-
 // -----------------------------
 // Middleware
 // -----------------------------
+
+// CORS: in Netlify proxy mode, frontend hits /api on SAME origin,
+// but we keep CORS open to support Postman / future changes.
+// origin: true => reflect request Origin, credentials allowed.
 app.use(
   cors({
-    origin: CORS_ORIGIN === "*" ? true : CORS_ORIGIN,
+    origin: true,
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+app.options("*", cors());
+
 app.use(helmet());
 app.use(morgan("dev"));
 app.use(express.json());
@@ -61,7 +67,7 @@ async function authMiddleware(req, res, next) {
   const token = req.cookies.erp_token;
   if (!token) {
     // For now we allow unauthenticated to keep compatibility.
-    // To hard-enforce auth in production, uncomment next line:
+    // In future, enforce:
     // return res.status(401).json({ error: "Not authenticated" });
     return next();
   }
@@ -76,7 +82,6 @@ async function authMiddleware(req, res, next) {
     next();
   } catch (e) {
     console.warn("JWT verification failed:", e.message);
-    // again: soft-fail for compatibility
     next();
   }
 }
@@ -85,8 +90,9 @@ async function authMiddleware(req, res, next) {
 app.use("/api", authMiddleware);
 
 // -----------------------------
-// Health check
+// Health check & root
 // -----------------------------
+
 app.get("/health", async (req, res) => {
   try {
     const result = await db.query("select now()");
@@ -95,6 +101,11 @@ app.get("/health", async (req, res) => {
     console.error("Health check error:", err);
     res.status(500).json({ status: "error", message: "DB unreachable" });
   }
+});
+
+// Simple root route so Render / browser sees something on /
+app.get("/", (req, res) => {
+  res.send("Service Pro ERP backend is running ✅");
 });
 
 // =====================================================
@@ -119,8 +130,7 @@ app.post("/api/login", async (req, res) => {
     }
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    // TEMP login check (REMOVE after first login)
-    if (password !== "admin123") {
+    if (!ok) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
     if (user.is_active === false) {
@@ -131,7 +141,7 @@ app.post("/api/login", async (req, res) => {
     res.cookie("erp_token", token, {
       httpOnly: true,
       sameSite: "lax",
-      secure: !!process.env.CORS_ORIGIN && process.env.CORS_ORIGIN.startsWith("https"),
+      secure: true, // Netlify + Render are https
       maxAge: 2 * 24 * 60 * 60 * 1000,
     });
 
@@ -271,7 +281,9 @@ app.patch("/api/erp-users/:id", async (req, res) => {
     }
 
     fields.push(`updated_at = now()`);
-    const sql = `update erp_users set ${fields.join(", ")} where id = $${idx} returning id, email, full_name, role, department, allowed_modules, denied_modules, is_active, created_at, updated_at`;
+    const sql = `update erp_users set ${fields.join(
+      ", "
+    )} where id = $${idx} returning id, email, full_name, role, department, allowed_modules, denied_modules, is_active, created_at, updated_at`;
     values.push(id);
 
     const { rows } = await db.query(sql, values);
@@ -305,13 +317,13 @@ app.get("/api/settings", async (req, res) => {
     const { rows } = await db.query("select * from settings where id = 1");
     if (!rows[0]) {
       return res.json({
-        jobPrefix: "ST-",
+        jobPrefix: "ST",
         jobNextNumber: 1,
         jobPadding: 4,
-        invoicePrefix: "INV-",
+        invoicePrefix: "INV",
         invoiceNextNumber: 1,
         invoicePadding: 4,
-        quotePrefix: "Q-",
+        quotePrefix: "Q",
         quoteNextNumber: 1,
         quotePadding: 4,
         gstPercent: 18,
@@ -391,7 +403,6 @@ app.post("/api/settings", async (req, res) => {
 // CLIENTS
 // =====================================================
 
-// GET /api/clients
 app.get("/api/clients", async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -406,7 +417,6 @@ app.get("/api/clients", async (req, res) => {
   }
 });
 
-// POST /api/clients
 app.post("/api/clients", async (req, res) => {
   const c = req.body || {};
   if (!c.name) {
@@ -453,7 +463,6 @@ app.post("/api/clients", async (req, res) => {
   }
 });
 
-// PATCH /api/clients/:id (optional)
 app.patch("/api/clients/:id", async (req, res) => {
   const { id } = req.params;
   const c = req.body || {};
@@ -510,7 +519,6 @@ app.patch("/api/clients/:id", async (req, res) => {
 // TECHNICIANS
 // =====================================================
 
-// GET /api/technicians
 app.get("/api/technicians", async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -525,7 +533,6 @@ app.get("/api/technicians", async (req, res) => {
   }
 });
 
-// POST /api/technicians
 app.post("/api/technicians", async (req, res) => {
   const t = req.body || {};
   if (!t.full_name) {
@@ -557,7 +564,6 @@ app.post("/api/technicians", async (req, res) => {
   }
 });
 
-// PATCH /api/technicians/:id
 app.patch("/api/technicians/:id", async (req, res) => {
   const { id } = req.params;
   const t = req.body || {};
@@ -588,7 +594,9 @@ app.patch("/api/technicians/:id", async (req, res) => {
     }
 
     fields.push(`updated_at = now()`);
-    const sql = `update technicians set ${fields.join(", ")} where id = $${idx} returning *`;
+    const sql = `update technicians set ${fields.join(
+      ", "
+    )} where id = $${idx} returning *`;
     values.push(id);
 
     const { rows } = await db.query(sql, values);
@@ -604,7 +612,6 @@ app.patch("/api/technicians/:id", async (req, res) => {
 // JOBS
 // =====================================================
 
-// GET /api/jobs
 app.get("/api/jobs", async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -621,7 +628,6 @@ app.get("/api/jobs", async (req, res) => {
   }
 });
 
-// POST /api/jobs
 app.post("/api/jobs", async (req, res) => {
   const j = req.body || {};
   if (!j.job_code) {
@@ -671,7 +677,6 @@ app.post("/api/jobs", async (req, res) => {
   }
 });
 
-// PATCH /api/jobs/:id
 app.patch("/api/jobs/:id", async (req, res) => {
   const { id } = req.params;
   const j = req.body || {};
@@ -704,7 +709,9 @@ app.patch("/api/jobs/:id", async (req, res) => {
     }
 
     fields.push("updated_at = now()");
-    const sql = `update jobs set ${fields.join(", ")} where id = $${idx} returning *`;
+    const sql = `update jobs set ${fields.join(
+      ", "
+    )} where id = $${idx} returning *`;
     values.push(id);
 
     const { rows } = await db.query(sql, values);
@@ -808,7 +815,6 @@ app.post("/api/vendors", async (req, res) => {
 // INVENTORY
 // =====================================================
 
-// GET /api/inventory-items
 app.get("/api/inventory-items", async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -824,7 +830,6 @@ app.get("/api/inventory-items", async (req, res) => {
   }
 });
 
-// POST /api/inventory-items (add / update stock)
 app.post("/api/inventory-items", async (req, res) => {
   const i = req.body || {};
   if (!i.part_number && !i.description) {
@@ -877,9 +882,6 @@ app.post("/api/inventory/usage", async (req, res) => {
     }
 
     const newStock = Number(current.current_stock) - Number(quantity);
-    if (newStock < 0) {
-      // Still allow negative, but you could block here
-    }
 
     await db.query(
       "update inventory_items set current_stock = $1, updated_at = now() where id = $2",
@@ -1013,7 +1015,6 @@ app.post("/api/invoices", async (req, res) => {
 });
 
 // PATCH /api/invoices/:idOrNumber
-// Frontend passes invoiceNumber (string)
 app.patch("/api/invoices/:id", async (req, res) => {
   const { id } = req.params;
   const i = req.body || {};
@@ -1059,7 +1060,6 @@ app.patch("/api/invoices/:id", async (req, res) => {
 // QUOTATIONS
 // =====================================================
 
-// GET /api/quotations
 app.get("/api/quotations", async (req, res) => {
   try {
     const { rows } = await db.query(
@@ -1078,8 +1078,17 @@ app.get("/api/quotations", async (req, res) => {
 
 // POST /api/quotations (header + items)
 app.post("/api/quotations", async (req, res) => {
-  const { client_id, valid_until, subtotal, tax_amount, total, status, notes, items, provisional_quote_number } =
-    req.body || {};
+  const {
+    client_id,
+    valid_until,
+    subtotal,
+    tax_amount,
+    total,
+    status,
+    notes,
+    items,
+    provisional_quote_number,
+  } = req.body || {};
 
   if (!client_id || !Array.isArray(items) || items.length === 0) {
     return res
@@ -1188,7 +1197,6 @@ app.patch("/api/quotations/:id", async (req, res) => {
 // HR DOCS
 // =====================================================
 
-// GET /api/hr-docs?erp_user_id=...&technician_id=...
 app.get("/api/hr-docs", async (req, res) => {
   const { erp_user_id, technician_id } = req.query;
   try {
@@ -1218,7 +1226,6 @@ app.get("/api/hr-docs", async (req, res) => {
   }
 });
 
-// POST /api/hr-docs
 app.post("/api/hr-docs", async (req, res) => {
   const d = req.body || {};
   if (!d.doc_type || !d.doc_name) {
@@ -1289,7 +1296,6 @@ app.get("/api/payroll", async (req, res) => {
 });
 
 // POST /api/payroll/generate-run { month, year }
-// Uses technicians.base_salary, zero bonus/deductions initially
 app.post("/api/payroll/generate-run", async (req, res) => {
   const month = parseInt(req.body?.month, 10);
   const year = parseInt(req.body?.year, 10);
@@ -1354,7 +1360,7 @@ app.post("/api/payroll/generate-run", async (req, res) => {
   }
 });
 
-// For reports page: /api/payroll/entries?year=YYYY[&month=MM]
+// GET /api/payroll/entries?year=YYYY[&month=MM]
 app.get("/api/payroll/entries", async (req, res) => {
   const year = parseInt(req.query.year, 10);
   const month = req.query.month ? parseInt(req.query.month, 10) : null;
@@ -1383,4 +1389,3 @@ app.get("/api/payroll/entries", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Service Pro ERP backend running on port ${PORT}`);
 });
-
