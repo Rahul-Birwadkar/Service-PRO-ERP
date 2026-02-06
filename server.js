@@ -1,27 +1,88 @@
 // server.js
-// Full backend API for Service Pro ERP (Neon/Postgres)
+// Production backend for Service Pro ERP (Express + Neon/Postgres)
 
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const db = require("./db");
+const helmet = require("helmet");
+const morgan = require("morgan");
 const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const cookieParser = require("cookie-parser");
+
+const db = require("./db");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
+
+const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
 // -----------------------------
 // Middleware
 // -----------------------------
-app.use(cors()); // tighten later for specific Netlify domain
+app.use(
+  cors({
+    origin: CORS_ORIGIN === "*" ? true : CORS_ORIGIN,
+    credentials: true,
+  })
+);
+app.use(helmet());
+app.use(morgan("dev"));
 app.use(express.json());
+app.use(cookieParser());
 
 // -----------------------------
-// Root route (for Render / browser test)
+// Helper: auth (optional now)
 // -----------------------------
-app.get("/", (req, res) => {
-  res.send("Service Pro ERP Backend Running 🚀");
-});
+
+function createToken(user) {
+  return jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      department: user.department,
+    },
+    JWT_SECRET,
+    { expiresIn: "2d" }
+  );
+}
+
+async function getUserById(id) {
+  const { rows } = await db.query(
+    "select id, email, full_name, role, department, allowed_modules, denied_modules, is_active from erp_users where id = $1",
+    [id]
+  );
+  return rows[0] || null;
+}
+
+async function authMiddleware(req, res, next) {
+  const token = req.cookies.erp_token;
+  if (!token) {
+    // For now we allow unauthenticated to keep compatibility.
+    // To hard-enforce auth in production, uncomment next line:
+    // return res.status(401).json({ error: "Not authenticated" });
+    return next();
+  }
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    const user = await getUserById(payload.id);
+    if (!user || user.is_active === false) {
+      return res.status(401).json({ error: "User inactive or not found" });
+    }
+    req.user = user;
+    next();
+  } catch (e) {
+    console.warn("JWT verification failed:", e.message);
+    // again: soft-fail for compatibility
+    next();
+  }
+}
+
+// Apply auth middleware to all /api routes (soft)
+app.use("/api", authMiddleware);
 
 // -----------------------------
 // Health check
@@ -37,2010 +98,55 @@ app.get("/health", async (req, res) => {
 });
 
 // =====================================================
-// CLIENTS ROUTES
+// AUTH & USER MANAGEMENT
 // =====================================================
 
-// GET /api/clients  -> list all clients
-app.get("/api/clients", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        id,
-        name,
-        gst_number,
-        billing_contact,
-        billing_email,
-        billing_phone,
-        site_contact,
-        site_phone,
-        credit_limit,
-        outstanding_amount,
-        status,
-        address_line1,
-        address_line2,
-        city,
-        state,
-        postal_code,
-        country,
-        created_at,
-        updated_at
-      from public.clients
-      order by name asc
-      `
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/clients error:", err);
-    res.status(500).json({ error: "Failed to fetch clients" });
-  }
-});
-
-// POST /api/clients  -> create new client
-app.post("/api/clients", async (req, res) => {
-  try {
-    const {
-      name,
-      gst_number,
-      billing_contact,
-      billing_email,
-      billing_phone,
-      site_contact,
-      site_phone,
-      credit_limit,
-      status,
-      address_line1,
-      address_line2,
-      city,
-      state,
-      postal_code,
-      country
-    } = req.body || {};
-
-    if (!name) {
-      return res.status(400).json({ error: "Client name is required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.clients (
-        name,
-        gst_number,
-        billing_contact,
-        billing_email,
-        billing_phone,
-        site_contact,
-        site_phone,
-        credit_limit,
-        status,
-        address_line1,
-        address_line2,
-        city,
-        state,
-        postal_code,
-        country
-      )
-      values (
-        $1,$2,$3,$4,$5,
-        $6,$7,
-        coalesce($8,0),
-        coalesce($9,'active'),
-        $10,$11,$12,$13,$14,$15
-      )
-      returning *
-      `,
-      [
-        name,
-        gst_number || null,
-        billing_contact || null,
-        billing_email || null,
-        billing_phone || null,
-        site_contact || null,
-        site_phone || null,
-        credit_limit || 0,
-        status || null,
-        address_line1 || null,
-        address_line2 || null,
-        city || null,
-        state || null,
-        postal_code || null,
-        country || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/clients error:", err);
-    res.status(500).json({ error: "Failed to create client" });
-  }
-});
-
-// =====================================================
-// VENDORS ROUTES
-// =====================================================
-
-// GET /api/vendors  -> list all vendors
-app.get("/api/vendors", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        id,
-        name,
-        gst_number,
-        category,
-        payment_terms,
-        contact_person,
-        contact_email,
-        contact_phone,
-        status,
-        address_line1,
-        address_line2,
-        city,
-        state,
-        postal_code,
-        country,
-        created_at,
-        updated_at
-      from public.vendors
-      order by name asc
-      `
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/vendors error:", err);
-    res.status(500).json({ error: "Failed to fetch vendors" });
-  }
-});
-
-// POST /api/vendors  -> create vendor
-app.post("/api/vendors", async (req, res) => {
-  try {
-    const {
-      name,
-      gst_number,
-      category,
-      payment_terms,
-      contact_person,
-      contact_email,
-      contact_phone,
-      status,
-      address_line1,
-      address_line2,
-      city,
-      state,
-      postal_code,
-      country
-    } = req.body || {};
-
-    if (!name) {
-      return res.status(400).json({ error: "Vendor name is required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.vendors (
-        name,
-        gst_number,
-        category,
-        payment_terms,
-        contact_person,
-        contact_email,
-        contact_phone,
-        status,
-        address_line1,
-        address_line2,
-        city,
-        state,
-        postal_code,
-        country
-      )
-      values (
-        $1,$2,$3,$4,$5,$6,$7,
-        coalesce($8,'active'),
-        $9,$10,$11,$12,$13,$14
-      )
-      returning *
-      `,
-      [
-        name,
-        gst_number || null,
-        category || null,
-        payment_terms || null,
-        contact_person || null,
-        contact_email || null,
-        contact_phone || null,
-        status || null,
-        address_line1 || null,
-        address_line2 || null,
-        city || null,
-        state || null,
-        postal_code || null,
-        country || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/vendors error:", err);
-    res.status(500).json({ error: "Failed to create vendor" });
-  }
-});
-
-// PATCH /api/vendors/:id  -> update vendor
-app.patch("/api/vendors/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const {
-      name,
-      gst_number,
-      category,
-      payment_terms,
-      contact_person,
-      contact_email,
-      contact_phone,
-      status,
-      address_line1,
-      address_line2,
-      city,
-      state,
-      postal_code,
-      country
-    } = req.body || {};
-
-    const result = await db.query(
-      `
-      update public.vendors
-      set
-        name = coalesce($1,name),
-        gst_number = coalesce($2,gst_number),
-        category = coalesce($3,category),
-        payment_terms = coalesce($4,payment_terms),
-        contact_person = coalesce($5,contact_person),
-        contact_email = coalesce($6,contact_email),
-        contact_phone = coalesce($7,contact_phone),
-        status = coalesce($8,status),
-        address_line1 = coalesce($9,address_line1),
-        address_line2 = coalesce($10,address_line2),
-        city = coalesce($11,city),
-        state = coalesce($12,state),
-        postal_code = coalesce($13,postal_code),
-        country = coalesce($14,country),
-        updated_at = now()
-      where id = $15
-      returning *
-      `,
-      [
-        name || null,
-        gst_number || null,
-        category || null,
-        payment_terms || null,
-        contact_person || null,
-        contact_email || null,
-        contact_phone || null,
-        status || null,
-        address_line1 || null,
-        address_line2 || null,
-        city || null,
-        state || null,
-        postal_code || null,
-        country || null,
-        id
-      ]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Vendor not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/vendors/:id error:", err);
-    res.status(500).json({ error: "Failed to update vendor" });
-  }
-});
-
-// =====================================================
-// TECHNICIANS ROUTES
-// =====================================================
-
-// GET /api/technicians  -> list technicians (with profile name)
-app.get("/api/technicians", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        t.id,
-        t.profile_id,
-        t.employee_code,
-        t.specialization,
-        t.status,
-        t.base_salary,
-        t.hourly_rate,
-        t.erp_user_id,
-        t.created_at,
-        t.updated_at,
-        p.full_name as profile_name
-      from public.technicians t
-      left join public.profiles p on p.id = t.profile_id
-      order by
-        t.employee_code asc nulls last,
-        p.full_name asc nulls last
-      `
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/technicians error:", err);
-    res.status(500).json({ error: "Failed to fetch technicians" });
-  }
-});
-
-// =====================================================
-// JOBS ROUTES (SERVICE ORDERS)
-// =====================================================
-
-// GET /api/jobs  -> list jobs (with client name)
-app.get("/api/jobs", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        j.id,
-        j.job_code,
-        j.client_id,
-        c.name as client_name,
-        j.machine_name,
-        j.machine_serial,
-        j.fault_description,
-        j.priority,
-        j.status,
-        j.assigned_technician_id,
-        j.labor_hours,
-        j.labor_rate,
-        j.material_cost,
-        j.total_amount,
-        j.is_return_job,
-        j.return_reason,
-        j.deadline,
-        j.created_at,
-        j.updated_at
-      from public.jobs j
-      left join public.clients c on c.id = j.client_id
-      order by j.created_at desc
-      `
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/jobs error:", err);
-    res.status(500).json({ error: "Failed to fetch jobs" });
-  }
-});
-
-// POST /api/jobs  -> create job
-app.post("/api/jobs", async (req, res) => {
-  try {
-    const {
-      job_code,
-      client_id,
-      machine_name,
-      machine_serial,
-      fault_description,
-      priority,
-      status,
-      assigned_technician_id,
-      labor_hours,
-      labor_rate,
-      material_cost,
-      total_amount,
-      deadline,
-      is_return_job,
-      return_reason
-    } = req.body || {};
-
-    if (!job_code || !client_id) {
-      return res
-        .status(400)
-        .json({ error: "job_code and client_id are required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.jobs (
-        job_code,
-        client_id,
-        machine_name,
-        machine_serial,
-        fault_description,
-        priority,
-        status,
-        assigned_technician_id,
-        labor_hours,
-        labor_rate,
-        material_cost,
-        total_amount,
-        deadline,
-        is_return_job,
-        return_reason
-      )
-      values (
-        $1,$2,$3,$4,$5,
-        coalesce($6,'medium')::job_priority,
-        coalesce($7,'open')::job_status,
-        $8,
-        coalesce($9,0),
-        coalesce($10,0),
-        coalesce($11,0),
-        coalesce($12,0),
-        $13,
-        coalesce($14,false),
-        $15
-      )
-      returning *
-      `,
-      [
-        job_code,
-        client_id,
-        machine_name || null,
-        machine_serial || null,
-        fault_description || null,
-        priority,
-        status,
-        assigned_technician_id || null,
-        labor_hours,
-        labor_rate,
-        material_cost,
-        total_amount,
-        deadline || null,
-        is_return_job,
-        return_reason || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/jobs error:", err);
-    res.status(500).json({ error: "Failed to create job" });
-  }
-});
-
-// PATCH /api/jobs/:id  -> update job fields
-app.patch("/api/jobs/:id", async (req, res) => {
-  try {
-    const jobId = req.params.id;
-    const {
-      status,
-      priority,
-      assigned_technician_id,
-      is_return_job,
-      return_reason,
-      total_amount,
-      deadline
-    } = req.body || {};
-
-    if (!jobId) {
-      return res.status(400).json({ error: "Job id is required" });
-    }
-
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
-    function pushField(columnName, value, enumType) {
-      if (typeof value === "undefined") return;
-
-      if (enumType) {
-        fields.push(
-          `${columnName} = coalesce($${idx}, ${columnName})::${enumType}`
-        );
-      } else {
-        fields.push(`${columnName} = $${idx}`);
-      }
-      values.push(value);
-      idx++;
-    }
-
-    pushField("status", status, "job_status");
-    pushField("priority", priority, "job_priority");
-    pushField("assigned_technician_id", assigned_technician_id);
-    pushField("is_return_job", is_return_job);
-    pushField("return_reason", return_reason);
-    pushField("total_amount", total_amount);
-    pushField("deadline", deadline);
-
-    fields.push(`updated_at = now()`);
-
-    if (fields.length === 1) {
-      return res.status(400).json({ error: "No updatable fields provided" });
-    }
-
-    const sql = `
-      update public.jobs
-      set ${fields.join(", ")}
-      where id = $${idx}
-      returning *
-    `;
-    values.push(jobId);
-
-    const result = await db.query(sql, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Job not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/jobs/:id error:", err);
-    res.status(500).json({ error: "Failed to update job" });
-  }
-});
-
-// =====================================================
-// ERP SETTINGS ROUTES (GLOBAL CONFIG)
-// =====================================================
-
-// GET /api/settings  -> all settings (usually one "global")
-app.get("/api/settings", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        id,
-        key,
-        value,
-        created_at,
-        updated_at
-      from public.erp_settings
-      order by created_at desc
-      `
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/settings error:", err);
-    res.status(500).json({ error: "Failed to fetch settings" });
-  }
-});
-
-// POST /api/settings  -> upsert by key
-app.post("/api/settings", async (req, res) => {
-  try {
-    const { key, value } = req.body || {};
-
-    if (!key) {
-      return res.status(400).json({ error: "Settings key is required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.erp_settings (key, value)
-      values ($1, $2::jsonb)
-      on conflict (key)
-      do update set
-        value = excluded.value,
-        updated_at = now()
-      returning id, key, value, created_at, updated_at
-      `,
-      [key, JSON.stringify(value || {})]
-    );
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/settings error:", err);
-    res.status(500).json({ error: "Failed to save settings" });
-  }
-});
-
-// =====================================================
-// ERP USERS ROUTES (APP USERS + ADVANCED ACCESS)
-// =====================================================
-
-// GET /api/erp-users
-app.get("/api/erp-users", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        id,
-        auth_user_id,
-        email,
-        full_name,
-        role,
-        department,
-        allowed_modules,
-        denied_modules,
-        is_active,
-        notes,
-        created_at,
-        updated_at
-      from public.erp_users
-      order by created_at desc
-      `
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/erp-users error:", err);
-    res.status(500).json({ error: "Failed to fetch ERP users" });
-  }
-});
-
-// POST /api/erp-users
-app.post("/api/erp-users", async (req, res) => {
-  try {
-    const {
-      auth_user_id,
-      email,
-      full_name,
-      role,
-      department,
-      allowed_modules,
-      denied_modules,
-      is_active,
-      notes
-    } = req.body || {};
-
-    if (!email || !role) {
-      return res
-        .status(400)
-        .json({ error: "Both email and role are required to create a user" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.erp_users (
-        auth_user_id,
-        email,
-        full_name,
-        role,
-        department,
-        allowed_modules,
-        denied_modules,
-        is_active,
-        notes
-      )
-      values (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        coalesce($6,'{}'::text[]),
-        coalesce($7,'{}'::text[]),
-        coalesce($8,true),
-        $9
-      )
-      returning
-        id,
-        auth_user_id,
-        email,
-        full_name,
-        role,
-        department,
-        allowed_modules,
-        denied_modules,
-        is_active,
-        notes,
-        created_at,
-        updated_at
-      `,
-      [
-        auth_user_id || null,
-        email.toLowerCase(),
-        full_name || null,
-        role,
-        department || null,
-        Array.isArray(allowed_modules) ? allowed_modules : [],
-        Array.isArray(denied_modules) ? denied_modules : [],
-        typeof is_active === "boolean" ? is_active : true,
-        notes || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/erp-users error:", err);
-    res.status(500).json({ error: "Failed to create ERP user" });
-  }
-});
-
-// PATCH /api/erp-users/:id
-app.patch("/api/erp-users/:id", async (req, res) => {
-  try {
-    const userId = req.params.id;
-    if (!userId) {
-      return res.status(400).json({ error: "User id is required" });
-    }
-
-    const {
-      auth_user_id,
-      email,
-      full_name,
-      role,
-      department,
-      allowed_modules,
-      denied_modules,
-      is_active,
-      notes
-    } = req.body || {};
-
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
-    function pushField(columnName, value) {
-      if (typeof value === "undefined") return;
-      fields.push(`${columnName} = $${idx}`);
-      values.push(value);
-      idx++;
-    }
-
-    pushField("auth_user_id", auth_user_id || null);
-    if (email) pushField("email", email.toLowerCase());
-    pushField("full_name", full_name || null);
-    pushField("role", role);
-    pushField("department", department || null);
-    if (Array.isArray(allowed_modules)) pushField("allowed_modules", allowed_modules);
-    if (Array.isArray(denied_modules)) pushField("denied_modules", denied_modules);
-    if (typeof is_active === "boolean") pushField("is_active", is_active);
-    if (typeof notes !== "undefined") pushField("notes", notes || null);
-
-    fields.push(`updated_at = now()`);
-
-    if (fields.length === 1) {
-      return res.status(400).json({ error: "No fields to update" });
-    }
-
-    const sql = `
-      update public.erp_users
-      set ${fields.join(", ")}
-      where id = $${idx}
-      returning
-        id,
-        auth_user_id,
-        email,
-        full_name,
-        role,
-        department,
-        allowed_modules,
-        denied_modules,
-        is_active,
-        notes,
-        created_at,
-        updated_at
-    `;
-    values.push(userId);
-
-    const result = await db.query(sql, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/erp-users/:id error:", err);
-    res.status(500).json({ error: "Failed to update ERP user" });
-  }
-});
-
-// =====================================================
-// INVENTORY ROUTES (ITEMS + STOCK MOVEMENTS)
-// =====================================================
-
-// =====================================================
-// INVENTORY ROUTES (ITEMS + STOCK MOVEMENTS)
-// =====================================================
-
-// GET /api/inventory-items
-app.get("/api/inventory-items", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        id,
-        item_code as part_number,
-        coalesce(name, description) as description,
-        category,
-        uom,
-        current_stock,
-        min_stock_level
-      from public.inventory_items
-      where is_active = true
-      order by category nulls last, item_code
-      `
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/inventory-items error:", err);
-    res.status(500).json({ error: "Failed to fetch inventory items" });
-  }
-});
-
-// POST /api/inventory/usage  -> log OUT movement from usage form
-app.post("/api/inventory/usage", async (req, res) => {
-  const { item_id, job_id, quantity, note } = req.body || {};
-
-  try {
-    if (!item_id || !quantity) {
-      return res
-        .status(400)
-        .json({ error: "item_id and quantity are required" });
-    }
-
-    const qty = Number(quantity);
-    if (!Number.isFinite(qty) || qty <= 0) {
-      return res
-        .status(400)
-        .json({ error: "Quantity must be a number > 0" });
-    }
-
-    // Make sure item exists and is active
-    const itemResult = await db.query(
-      `
-      select id, current_stock
-      from public.inventory_items
-      where id = $1 and is_active = true
-      `,
-      [item_id]
-    );
-
-    if (itemResult.rowCount === 0) {
-      return res.status(404).json({ error: "Inventory item not found" });
-    }
-
-    const currentStock = Number(itemResult.rows[0].current_stock) || 0;
-
-    // Business decision: allow negative or not
-    // For now, we allow it but log a warning
-    if (currentStock < qty) {
-      console.warn(
-        "Inventory usage would drive stock negative:",
-        { item_id, currentStock, qty }
-      );
-    }
-
-    await db.query("BEGIN");
-
-    // 1) Insert stock movement (OUT)
-    await db.query(
-      `
-      insert into public.stock_movements (
-        item_id,
-        direction,
-        quantity,
-        job_id,
-        note
-      )
-      values ($1, 'out'::stock_direction, $2, $3, $4)
-      `,
-      [item_id, qty, job_id || null, note || null]
-    );
-
-    // 2) Update current stock
-    await db.query(
-      `
-      update public.inventory_items
-      set current_stock = current_stock - $1,
-          updated_at   = now()
-      where id = $2
-      `,
-      [qty, item_id]
-    );
-
-    await db.query("COMMIT");
-    res.status(201).json({ success: true });
-  } catch (err) {
-    await db.query("ROLLBACK").catch(() => {});
-    console.error("POST /api/inventory/usage error:", err);
-    res.status(500).json({ error: "Failed to record inventory usage" });
-  }
-});
-
-
-// =====================================================
-// QUOTATIONS ROUTES
-// =====================================================
-
-// GET /api/quotations
-app.get("/api/quotations", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        q.id,
-        q.quote_number,
-        q.client_id,
-        c.name as client_name,
-        q.job_id,
-        q.status,
-        q.valid_until,
-        q.subtotal,
-        q.tax_amount,
-        q.total,
-        q.notes,
-        q.created_at,
-        q.updated_at
-      from public.quotations q
-      left join public.clients c on c.id = q.client_id
-      order by q.created_at desc
-      `
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/quotations error:", err);
-    res.status(500).json({ error: "Failed to fetch quotations" });
-  }
-});
-
-// POST /api/quotations
-app.post("/api/quotations", async (req, res) => {
-  try {
-    const {
-      quote_number,
-      client_id,
-      job_id,
-      status,
-      valid_until,
-      subtotal,
-      tax_amount,
-      total,
-      notes
-    } = req.body || {};
-
-    if (!client_id) {
-      return res.status(400).json({ error: "client_id is required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.quotations (
-        quote_number,
-        client_id,
-        job_id,
-        status,
-        valid_until,
-        subtotal,
-        tax_amount,
-        total,
-        notes
-      )
-      values (
-        $1,$2,$3,
-        coalesce($4,'draft'),
-        $5,
-        coalesce($6,0),
-        coalesce($7,0),
-        coalesce($8,coalesce($6,0)+coalesce($7,0)),
-        $9
-      )
-      returning *
-      `,
-      [
-        quote_number || null,
-        client_id,
-        job_id || null,
-        status,
-        valid_until || null,
-        subtotal,
-        tax_amount,
-        total,
-        notes || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/quotations error:", err);
-    res.status(500).json({ error: "Failed to create quotation" });
-  }
-});
-
-// PATCH /api/quotations/:id
-app.patch("/api/quotations/:id", async (req, res) => {
-  try {
-    const quoteId = req.params.id;
-    if (!quoteId) {
-      return res.status(400).json({ error: "Quotation id is required" });
-    }
-
-    const {
-      quote_number,
-      status,
-      valid_until,
-      subtotal,
-      tax_amount,
-      total,
-      notes
-    } = req.body || {};
-
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
-    function pushField(columnName, value) {
-      if (typeof value === "undefined") return;
-      fields.push(`${columnName} = $${idx}`);
-      values.push(value);
-      idx++;
-    }
-
-    pushField("quote_number", quote_number || null);
-    pushField("status", status);
-    pushField("valid_until", valid_until || null);
-    pushField("subtotal", subtotal);
-    pushField("tax_amount", tax_amount);
-    pushField("total", total);
-    pushField("notes", notes || null);
-    fields.push("updated_at = now()");
-
-    if (fields.length === 1) {
-      return res.status(400).json({ error: "No fields to update" });
-    }
-
-    const sql = `
-      update public.quotations
-      set ${fields.join(", ")}
-      where id = $${idx}
-      returning *
-    `;
-    values.push(quoteId);
-
-    const result = await db.query(sql, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Quotation not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/quotations/:id error:", err);
-    res.status(500).json({ error: "Failed to update quotation" });
-  }
-});
-
-// =====================================================
-// INVOICES & FINANCE ROUTES
-// =====================================================
-
-// GET /api/invoices
-app.get("/api/invoices", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        i.id,
-        i.invoice_number,
-        i.client_id,
-        i.job_id,
-        i.status,
-        i.subtotal,
-        i.tax_amount,
-        i.total,
-        i.issue_date,
-        i.due_date,
-        i.notes,
-        i.created_at,
-        json_build_object(
-          'name', c.name,
-          'billing_contact', c.billing_contact,
-          'billing_email', c.billing_email,
-          'billing_phone', c.billing_phone,
-          'address_line1', c.address_line1,
-          'city', c.city,
-          'state', c.state,
-          'postal_code', c.postal_code,
-          'country', c.country
-        ) as client
-      from public.invoices i
-      left join public.clients c on c.id = i.client_id
-      order by i.issue_date asc nulls last, i.created_at asc
-      `
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/invoices error:", err);
-    res.status(500).json({ error: "Failed to fetch invoices" });
-  }
-});
-
-// POST /api/invoices
-app.post("/api/invoices", async (req, res) => {
-  try {
-    const {
-      invoice_number,
-      client_id,
-      job_id,
-      status,
-      subtotal,
-      tax_amount,
-      total,
-      issue_date,
-      due_date,
-      notes
-    } = req.body || {};
-
-    if (!client_id) {
-      return res.status(400).json({ error: "client_id is required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.invoices (
-        invoice_number,
-        client_id,
-        job_id,
-        status,
-        subtotal,
-        tax_amount,
-        total,
-        issue_date,
-        due_date,
-        notes
-      )
-      values (
-        $1,$2,$3,
-        coalesce($4,'unpaid')::invoice_status,
-        coalesce($5,0),
-        coalesce($6,0),
-        coalesce($7,coalesce($5,0)+coalesce($6,0)),
-        $8,
-        $9,
-        $10
-      )
-      returning *
-      `,
-      [
-        invoice_number || null,
-        client_id,
-        job_id || null,
-        status,
-        subtotal,
-        tax_amount,
-        total,
-        issue_date || null,
-        due_date || null,
-        notes || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/invoices error:", err);
-    res.status(500).json({ error: "Failed to create invoice" });
-  }
-});
-
-// PATCH /api/invoices/:id
-app.patch("/api/invoices/:id", async (req, res) => {
-  try {
-    const invoiceId = req.params.id;
-    if (!invoiceId) {
-      return res.status(400).json({ error: "Invoice id is required" });
-    }
-
-    const {
-      invoice_number,
-      status,
-      subtotal,
-      tax_amount,
-      total,
-      issue_date,
-      due_date,
-      notes
-    } = req.body || {};
-
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
-    function pushField(columnName, value, enumType) {
-      if (typeof value === "undefined") return;
-      if (enumType) {
-        fields.push(
-          `${columnName} = coalesce($${idx}, ${columnName})::${enumType}`
-        );
-      } else {
-        fields.push(`${columnName} = $${idx}`);
-      }
-      values.push(value);
-      idx++;
-    }
-
-    pushField("invoice_number", invoice_number || null);
-    pushField("status", status, "invoice_status");
-    pushField("subtotal", subtotal);
-    pushField("tax_amount", tax_amount);
-    pushField("total", total);
-    pushField("issue_date", issue_date || null);
-    pushField("due_date", due_date || null);
-    pushField("notes", notes || null);
-    fields.push("updated_at = now()");
-
-    if (fields.length === 1) {
-      return res.status(400).json({ error: "No fields to update" });
-    }
-
-    const sql = `
-      update public.invoices
-      set ${fields.join(", ")}
-      where id = $${idx}
-      returning *
-    `;
-    values.push(invoiceId);
-
-    const result = await db.query(sql, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Invoice not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/invoices/:id error:", err);
-    res.status(500).json({ error: "Failed to update invoice" });
-  }
-});
-
-// GET /api/finance/summary  -> finance KPIs (for finance.html + dashboard)
-app.get("/api/finance/summary", async (req, res) => {
-  try {
-    const jobsTotal = await db.query(
-      `select count(*)::int as count from public.jobs`
-    );
-
-    const billableJobs = await db.query(
-      `
-      select count(*)::int as count
-      from public.jobs
-      where status in ('completed','closed')
-      `
-    );
-
-    const invoicedJobs = await db.query(
-      `
-      select count(distinct job_id)::int as count
-      from public.invoices
-      where job_id is not null
-      `
-    );
-
-    const unpaidInvoices = await db.query(
-      `
-      select
-        count(*)::int as count,
-        coalesce(sum(total),0)::numeric as total_unpaid
-      from public.invoices
-      where status in ('unpaid','partially_paid','overdue')
-      `
-    );
-
-    const invoicedRevenue = await db.query(
-      `
-      select coalesce(sum(total),0)::numeric as total_invoiced
-      from public.invoices
-      where status in ('paid','partially_paid')
-      `
-    );
-
-    const potentialRevenue = await db.query(
-      `
-      select coalesce(sum(j.total_amount),0)::numeric as potential
-      from public.jobs j
-      left join public.invoices i on i.job_id = j.id
-      where j.status in ('completed','closed') and i.id is null
-      `
-    );
-
-    res.json({
-      total_jobs: jobsTotal.rows[0].count,
-      billable_jobs: billableJobs.rows[0].count,
-      invoiced_jobs: invoicedJobs.rows[0].count,
-      unpaid_invoices_count: unpaidInvoices.rows[0].count,
-      unpaid_invoices_amount: unpaidInvoices.rows[0].total_unpaid,
-      potential_revenue: potentialRevenue.rows[0].potential,
-      invoiced_revenue: invoicedRevenue.rows[0].total_invoiced
-    });
-  } catch (err) {
-    console.error("GET /api/finance/summary error:", err);
-    res.status(500).json({ error: "Failed to compute finance summary" });
-  }
-});
-
-// =====================================================
-// EXPENSES ROUTES
-// =====================================================
-
-// GET /api/expenses
-app.get("/api/expenses", async (req, res) => {
-  try {
-    const result = await db.query(
-      `
-      select
-        id,
-        expense_date,
-        type,
-        amount,
-        job_ref,
-        notes,
-        created_at,
-        updated_at
-      from public.expenses
-      order by expense_date desc, created_at desc
-      `
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/expenses error:", err);
-    res.status(500).json({ error: "Failed to fetch expenses" });
-  }
-});
-
-// POST /api/expenses
-app.post("/api/expenses", async (req, res) => {
-  try {
-    const { expense_date, type, amount, job_ref, notes } = req.body || {};
-
-    if (!expense_date) {
-      return res.status(400).json({ error: "expense_date is required" });
-    }
-
-    const numericAmount = Number(amount || 0);
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-      return res.status(400).json({ error: "Valid amount is required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.expenses (
-        expense_date,
-        type,
-        amount,
-        job_ref,
-        notes
-      )
-      values ($1,$2,$3,$4,$5)
-      returning *
-      `,
-      [
-        expense_date,
-        type || "other",
-        numericAmount,
-        job_ref || null,
-        notes || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/expenses error:", err);
-    res.status(500).json({ error: "Failed to create expense" });
-  }
-});
-
-// PATCH /api/expenses/:id
-app.patch("/api/expenses/:id", async (req, res) => {
-  try {
-    const expId = req.params.id;
-    const { expense_date, type, amount, job_ref, notes } = req.body || {};
-
-    if (!expId) {
-      return res.status(400).json({ error: "Expense id is required" });
-    }
-
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
-    function pushField(column, value) {
-      if (value === undefined) return;
-      fields.push(`${column} = $${idx}`);
-      values.push(value);
-      idx++;
-    }
-
-    if (amount !== undefined) {
-      const numericAmount = Number(amount || 0);
-      if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-        return res.status(400).json({ error: "Valid amount is required" });
-      }
-      pushField("amount", numericAmount);
-    }
-
-    pushField("expense_date", expense_date);
-    pushField("type", type);
-    pushField("job_ref", job_ref);
-    pushField("notes", notes);
-    fields.push("updated_at = now()");
-
-    if (fields.length === 1) {
-      return res.status(400).json({ error: "No fields to update" });
-    }
-
-    const sql = `
-      update public.expenses
-      set ${fields.join(", ")}
-      where id = $${idx}
-      returning *
-    `;
-    values.push(expId);
-
-    const result = await db.query(sql, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Expense not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/expenses/:id error:", err);
-    res.status(500).json({ error: "Failed to update expense" });
-  }
-});
-
-// DELETE /api/expenses/:id
-app.delete("/api/expenses/:id", async (req, res) => {
-  try {
-    const expId = req.params.id;
-    if (!expId) {
-      return res.status(400).json({ error: "Expense id is required" });
-    }
-
-    const result = await db.query(
-      `delete from public.expenses where id = $1 returning id`,
-      [expId]
-    );
-
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Expense not found" });
-    }
-
-    res.json({ success: true, id: expId });
-  } catch (err) {
-    console.error("DELETE /api/expenses/:id error:", err);
-    res.status(500).json({ error: "Failed to delete expense" });
-  }
-});
-
-// =====================================================
-// PAYROLL ROUTES
-// =====================================================
-
-// GET /api/payroll  (optional filters: technician_id, month=YYYY-MM)
-app.get("/api/payroll", async (req, res) => {
-  try {
-    const { technician_id, month } = req.query;
-
-    let where = [];
-    let params = [];
-    let idx = 1;
-
-    if (technician_id) {
-      where.push(`technician_id = $${idx++}`);
-      params.push(technician_id);
-    }
-    if (month) {
-      where.push(
-        `to_char(period_start,'YYYY-MM') = $${idx++}`
-      );
-      params.push(month);
-    }
-
-    const sql = `
-      select
-        id,
-        technician_id,
-        period_start,
-        period_end,
-        basic_pay,
-        overtime_pay,
-        deductions,
-        net_pay,
-        status,
-        created_at,
-        updated_at
-      from public.payroll_entries
-      ${where.length ? "where " + where.join(" and ") : ""}
-      order by period_start desc, technician_id asc
-    `;
-
-    const result = await db.query(sql, params);
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/payroll error:", err);
-    res.status(500).json({ error: "Failed to fetch payroll entries" });
-  }
-});
-
-// POST /api/payroll
-app.post("/api/payroll", async (req, res) => {
-  try {
-    const {
-      technician_id,
-      period_start,
-      period_end,
-      basic_pay,
-      overtime_pay,
-      deductions,
-      net_pay,
-      status
-    } = req.body || {};
-
-    if (!technician_id || !period_start || !period_end) {
-      return res
-        .status(400)
-        .json({ error: "technician_id, period_start, period_end are required" });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.payroll_entries (
-        technician_id,
-        period_start,
-        period_end,
-        basic_pay,
-        overtime_pay,
-        deductions,
-        net_pay,
-        status
-      )
-      values (
-        $1,$2,$3,
-        coalesce($4,0),
-        coalesce($5,0),
-        coalesce($6,0),
-        coalesce($7,coalesce($4,0)+coalesce($5,0)-coalesce($6,0)),
-        coalesce($8,'pending')
-      )
-      returning *
-      `,
-      [
-        technician_id,
-        period_start,
-        period_end,
-        basic_pay,
-        overtime_pay,
-        deductions,
-        net_pay,
-        status
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/payroll error:", err);
-    res.status(500).json({ error: "Failed to create payroll entry" });
-  }
-});
-
-// PATCH /api/payroll/:id
-app.patch("/api/payroll/:id", async (req, res) => {
-  try {
-    const payrollId = req.params.id;
-    if (!payrollId) {
-      return res.status(400).json({ error: "Payroll id is required" });
-    }
-
-    const {
-      technician_id,
-      period_start,
-      period_end,
-      basic_pay,
-      overtime_pay,
-      deductions,
-      net_pay,
-      status
-    } = req.body || {};
-
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
-    function pushField(columnName, value) {
-      if (typeof value === "undefined") return;
-      fields.push(`${columnName} = $${idx}`);
-      values.push(value);
-      idx++;
-    }
-
-    pushField("technician_id", technician_id);
-    pushField("period_start", period_start);
-    pushField("period_end", period_end);
-    pushField("basic_pay", basic_pay);
-    pushField("overtime_pay", overtime_pay);
-    pushField("deductions", deductions);
-    pushField("net_pay", net_pay);
-    pushField("status", status);
-    fields.push("updated_at = now()");
-
-    if (fields.length === 1) {
-      return res.status(400).json({ error: "No fields to update" });
-    }
-
-    const sql = `
-      update public.payroll_entries
-      set ${fields.join(", ")}
-      where id = $${idx}
-      returning *
-    `;
-    values.push(payrollId);
-
-    const result = await db.query(sql, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "Payroll entry not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/payroll/:id error:", err);
-    res.status(500).json({ error: "Failed to update payroll entry" });
-  }
-});
-
-// =====================================================
-// HR DOCS ROUTES
-// =====================================================
-
-// GET /api/hr-docs
-app.get("/api/hr-docs", async (req, res) => {
-  try {
-    const { technician_id } = req.query;
-    const params = [];
-    let whereClause = "";
-
-    if (technician_id) {
-      whereClause = "where technician_id = $1";
-      params.push(technician_id);
-    }
-
-    const result = await db.query(
-      `
-      select
-        id,
-        technician_id,
-        doc_type,
-        doc_number,
-        issue_date,
-        expiry_date,
-        status,
-        notes,
-        file_url,
-        created_at,
-        updated_at
-      from public.hr_docs
-      ${whereClause}
-      order by expiry_date asc nulls last, created_at desc
-      `,
-      params
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET /api/hr-docs error:", err);
-    res.status(500).json({ error: "Failed to fetch HR docs" });
-  }
-});
-
-// POST /api/hr-docs
-app.post("/api/hr-docs", async (req, res) => {
-  try {
-    const {
-      technician_id,
-      doc_type,
-      doc_number,
-      issue_date,
-      expiry_date,
-      status,
-      notes,
-      file_url
-    } = req.body || {};
-
-    if (!technician_id || !doc_type || !expiry_date) {
-      return res.status(400).json({
-        error: "technician_id, doc_type and expiry_date are required"
-      });
-    }
-
-    const result = await db.query(
-      `
-      insert into public.hr_docs (
-        technician_id,
-        doc_type,
-        doc_number,
-        issue_date,
-        expiry_date,
-        status,
-        notes,
-        file_url
-      )
-      values (
-        $1,$2,$3,
-        $4,
-        $5,
-        coalesce($6,'valid')::hr_doc_status,
-        $7,
-        $8
-      )
-      returning *
-      `,
-      [
-        technician_id,
-        doc_type,
-        doc_number || null,
-        issue_date || null,
-        expiry_date,
-        status,
-        notes || null,
-        file_url || null
-      ]
-    );
-
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("POST /api/hr-docs error:", err);
-    res.status(500).json({ error: "Failed to create HR doc" });
-  }
-});
-
-// PATCH /api/hr-docs/:id
-app.patch("/api/hr-docs/:id", async (req, res) => {
-  try {
-    const docId = req.params.id;
-    if (!docId) {
-      return res.status(400).json({ error: "HR doc id is required" });
-    }
-
-    const {
-      technician_id,
-      doc_type,
-      doc_number,
-      issue_date,
-      expiry_date,
-      status,
-      notes,
-      file_url
-    } = req.body || {};
-
-    const fields = [];
-    const values = [];
-    let idx = 1;
-
-    function pushField(columnName, value, enumType) {
-      if (typeof value === "undefined") return;
-      if (enumType) {
-        fields.push(
-          `${columnName} = coalesce($${idx}, ${columnName})::${enumType}`
-        );
-      } else {
-        fields.push(`${columnName} = $${idx}`);
-      }
-      values.push(value);
-      idx++;
-    }
-
-    pushField("technician_id", technician_id);
-    pushField("doc_type", doc_type);
-    pushField("doc_number", doc_number || null);
-    pushField("issue_date", issue_date || null);
-    pushField("expiry_date", expiry_date || null);
-    pushField("status", status, "hr_doc_status");
-    pushField("notes", notes || null);
-    pushField("file_url", file_url || null);
-    fields.push("updated_at = now()");
-
-    if (fields.length === 1) {
-      return res.status(400).json({ error: "No fields to update" });
-    }
-
-    const sql = `
-      update public.hr_docs
-      set ${fields.join(", ")}
-      where id = $${idx}
-      returning *
-    `;
-    values.push(docId);
-
-    const result = await db.query(sql, values);
-    if (result.rowCount === 0) {
-      return res.status(404).json({ error: "HR doc not found" });
-    }
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error("PATCH /api/hr-docs/:id error:", err);
-    res.status(500).json({ error: "Failed to update HR doc" });
-  }
-});
-
-// =====================================================
-// REPORTS (EXECUTIVE OVERVIEW)
-// =====================================================
-
-// GET /api/reports/summary  -> executive KPIs (for reports.html / index.html)
-app.get("/api/reports/summary", async (req, res) => {
-  try {
-    const jobsTotal = await db.query(
-      `select count(*)::int as count from public.jobs`
-    );
-    const jobsByStatus = await db.query(
-      `
-      select status, count(*)::int as count
-      from public.jobs
-      group by status
-      `
-    );
-    const returns = await db.query(
-      `
-      select count(*)::int as count
-      from public.jobs
-      where is_return_job = true
-      `
-    );
-    const clientsTotal = await db.query(
-      `select count(*)::int as count from public.clients`
-    );
-    const revenue = await db.query(
-      `
-      select coalesce(sum(total),0)::numeric as total_revenue
-      from public.invoices
-      where status in ('paid','partially_paid')
-      `
-    );
-    const expenses = await db.query(
-      `
-      select coalesce(sum(amount),0)::numeric as total_expenses
-      from public.expenses
-      `
-    );
-
-    const totalJobs = jobsTotal.rows[0].count;
-    const statusMap = {};
-    for (const row of jobsByStatus.rows) {
-      statusMap[row.status] = row.count;
-    }
-    const completed =
-      (statusMap["completed"] || 0) + (statusMap["closed"] || 0);
-    const returnsCount = returns.rows[0].count;
-    const successRatio =
-      totalJobs > 0 ? (completed / totalJobs) * 100.0 : 0;
-    const returnRatio =
-      totalJobs > 0 ? (returnsCount / totalJobs) * 100.0 : 0;
-
-    res.json({
-      total_jobs: totalJobs,
-      jobs_by_status: statusMap,
-      completed_jobs: completed,
-      returns: returnsCount,
-      success_ratio: successRatio,
-      return_ratio: returnRatio,
-      total_clients: clientsTotal.rows[0].count,
-      total_revenue: revenue.rows[0].total_revenue,
-      total_expenses: expenses.rows[0].total_expenses,
-      net_revenue:
-        Number(revenue.rows[0].total_revenue) -
-        Number(expenses.rows[0].total_expenses)
-    });
-  } catch (err) {
-    console.error("GET /api/reports/summary error:", err);
-    res.status(500).json({ error: "Failed to compute reports summary" });
-  }
-});
-
-
-// =====================================================
-// AUTH / LOGIN (email-based using erp_users in Neon)
-// =====================================================
-
-// app.post("/api/login", async (req, res) => {
-//   try {
-//     const { email } = req.body || {};
-
-//     if (!email) {
-//       return res
-//         .status(400)
-//         .json({ error: "Email is required for login" });
-//     }
-
-//     const result = await db.query(
-//       `
-//       select
-//         id,
-//         email,
-//         full_name,
-//         role,
-//         department,
-//         allowed_modules,
-//         denied_modules,
-//         is_active,
-//         created_at,
-//         updated_at
-//       from public.erp_users
-//       where lower(email) = lower($1)
-//       limit 1
-//       `,
-//       [email.trim().toLowerCase()]
-//     );
-
-//     if (result.rowCount === 0) {
-//       return res
-//         .status(401)
-//         .json({ error: "Invalid email or account not found" });
-//     }
-
-//     const user = result.rows[0];
-
-//     if (user.is_active === false) {
-//       return res
-//         .status(403)
-//         .json({ error: "Your ERP account is inactive. Contact admin." });
-//     }
-
-//     res.json({
-//       id: user.id,
-//       email: user.email,
-//       full_name: user.full_name,
-//       role: user.role,
-//       department: user.department,
-//       allowed_modules: user.allowed_modules || [],
-//       denied_modules: user.denied_modules || [],
-//       is_active: user.is_active
-//     });
-//   } catch (err) {
-//     console.error("POST /api/login error:", err);
-//     res.status(500).json({ error: "Login failed due to server error" });
-//   }
-// });
-
-// =====================================================
-// AUTH / LOGIN
-// =====================================================
+// POST /api/login
 app.post("/api/login", async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email and password are required" });
+  }
+
   try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res
-        .status(400)
-        .json({ error: "Email and password are required." });
-    }
-
-    const result = await db.query(
-      `
-      select
-        id,
-        email,
-        full_name,
-        role,
-        department,
-        allowed_modules,
-        denied_modules,
-        is_active,
-        password_hash
-      from public.erp_users
-      where email = $1
-      limit 1
-      `,
+    const { rows } = await db.query(
+      "select * from erp_users where lower(email) = lower($1)",
       [email]
     );
-
-    if (result.rowCount === 0) {
-      return res.status(401).json({ error: "Invalid email or password." });
-    }
-
-    const user = result.rows[0];
-
-    if (!user.is_active) {
-      return res.status(403).json({ error: "User is inactive." });
-    }
-
-    if (!user.password_hash) {
-      return res.status(401).json({ error: "Invalid email or password." });
+    const user = rows[0];
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) {
-      return res.status(401).json({ error: "Invalid email or password." });
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+    if (user.is_active === false) {
+      return res.status(403).json({ error: "User inactive" });
     }
 
-    // Never send hash back
-    const { password_hash, ...safeUser } = user;
+    const token = createToken(user);
+    res.cookie("erp_token", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: !!process.env.CORS_ORIGIN && process.env.CORS_ORIGIN.startsWith("https"),
+      maxAge: 2 * 24 * 60 * 60 * 1000,
+    });
+
+    const safeUser = {
+      id: user.id,
+      email: user.email,
+      full_name: user.full_name,
+      role: user.role,
+      roleKey: (user.role || "").toLowerCase(),
+      roleLabel: user.role,
+      department: user.department,
+      allowed_modules: user.allowed_modules || [],
+      denied_modules: user.denied_modules || [],
+      is_active: user.is_active,
+      created_at: user.created_at,
+    };
 
     res.json(safeUser);
   } catch (err) {
@@ -2049,19 +155,1223 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// TEMP: password hash helper (remove after use)
-app.post("/api/util/hash", async (req, res) => {
+// GET /api/erp-users
+app.get("/api/erp-users", async (req, res) => {
   try {
-    const { password } = req.body;
-    if (!password) {
-      return res.status(400).json({ error: "Password is required" });
+    const { rows } = await db.query(
+      `select id, email, full_name, role, department,
+              allowed_modules, denied_modules, is_active,
+              created_at, updated_at
+       from erp_users
+       order by created_at desc`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("List users error:", err);
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+});
+
+// POST /api/erp-users
+app.post("/api/erp-users", async (req, res) => {
+  const {
+    email,
+    password,
+    full_name,
+    role,
+    department,
+    allowed_modules,
+    denied_modules,
+    is_active,
+  } = req.body || {};
+
+  if (!email || !password || !full_name || !role) {
+    return res.status(400).json({ error: "email, password, full_name, role required" });
+  }
+
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    const { rows } = await db.query(
+      `insert into erp_users
+       (email, password_hash, full_name, role, department,
+        allowed_modules, denied_modules, is_active)
+       values ($1,$2,$3,$4,$5,$6,$7, coalesce($8,true))
+       returning id, email, full_name, role, department,
+                 allowed_modules, denied_modules, is_active,
+                 created_at, updated_at`,
+      [
+        email,
+        hash,
+        full_name,
+        role,
+        department || null,
+        allowed_modules || [],
+        denied_modules || [],
+        is_active !== false,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create user error:", err);
+    res.status(500).json({ error: "Failed to create user" });
+  }
+});
+
+// PATCH /api/erp-users/:id
+app.patch("/api/erp-users/:id", async (req, res) => {
+  const { id } = req.params;
+  const {
+    full_name,
+    role,
+    department,
+    allowed_modules,
+    denied_modules,
+    is_active,
+    password,
+  } = req.body || {};
+
+  try {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    if (full_name !== undefined) {
+      fields.push(`full_name = $${idx++}`);
+      values.push(full_name);
+    }
+    if (role !== undefined) {
+      fields.push(`role = $${idx++}`);
+      values.push(role);
+    }
+    if (department !== undefined) {
+      fields.push(`department = $${idx++}`);
+      values.push(department);
+    }
+    if (allowed_modules !== undefined) {
+      fields.push(`allowed_modules = $${idx++}`);
+      values.push(allowed_modules);
+    }
+    if (denied_modules !== undefined) {
+      fields.push(`denied_modules = $${idx++}`);
+      values.push(denied_modules);
+    }
+    if (is_active !== undefined) {
+      fields.push(`is_active = $${idx++}`);
+      values.push(is_active);
+    }
+    if (password !== undefined && password) {
+      const hash = await bcrypt.hash(password, 10);
+      fields.push(`password_hash = $${idx++}`);
+      values.push(hash);
     }
 
-    const hash = await bcrypt.hash(password, 10);
-    res.json({ hash });
+    if (fields.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    fields.push(`updated_at = now()`);
+    const sql = `update erp_users set ${fields.join(", ")} where id = $${idx} returning id, email, full_name, role, department, allowed_modules, denied_modules, is_active, created_at, updated_at`;
+    values.push(id);
+
+    const { rows } = await db.query(sql, values);
+    if (!rows[0]) return res.status(404).json({ error: "User not found" });
+    res.json(rows[0]);
   } catch (err) {
-    console.error("Hash helper error:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Update user error:", err);
+    res.status(500).json({ error: "Failed to update user" });
+  }
+});
+
+// DELETE /api/erp-users/:id
+app.delete("/api/erp-users/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    await db.query("delete from erp_users where id = $1", [id]);
+    res.status(204).end();
+  } catch (err) {
+    console.error("Delete user error:", err);
+    res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
+// =====================================================
+// SETTINGS
+// =====================================================
+
+// GET /api/settings
+app.get("/api/settings", async (req, res) => {
+  try {
+    const { rows } = await db.query("select * from settings where id = 1");
+    if (!rows[0]) {
+      return res.json({
+        jobPrefix: "ST-",
+        jobNextNumber: 1,
+        jobPadding: 4,
+        invoicePrefix: "INV-",
+        invoiceNextNumber: 1,
+        invoicePadding: 4,
+        quotePrefix: "Q-",
+        quoteNextNumber: 1,
+        quotePadding: 4,
+        gstPercent: 18,
+        creditRiskThreshold: 80,
+        lowStockMargin: 0,
+      });
+    }
+    const s = rows[0];
+    res.json({
+      jobPrefix: s.job_prefix,
+      jobNextNumber: s.job_next_number,
+      jobPadding: s.job_padding,
+      invoicePrefix: s.invoice_prefix,
+      invoiceNextNumber: s.invoice_next_number,
+      invoicePadding: s.invoice_padding,
+      quotePrefix: s.quote_prefix,
+      quoteNextNumber: s.quote_next_number,
+      quotePadding: s.quote_padding,
+      gstPercent: Number(s.gst_percent),
+      creditRiskThreshold: s.credit_risk_threshold,
+      lowStockMargin: s.low_stock_margin,
+    });
+  } catch (err) {
+    console.error("Get settings error:", err);
+    res.status(500).json({ error: "Failed to fetch settings" });
+  }
+});
+
+// POST /api/settings
+app.post("/api/settings", async (req, res) => {
+  const s = req.body || {};
+  try {
+    await db.query(
+      `insert into settings
+       (id, job_prefix, job_next_number, job_padding,
+        invoice_prefix, invoice_next_number, invoice_padding,
+        quote_prefix, quote_next_number, quote_padding,
+        gst_percent, credit_risk_threshold, low_stock_margin, updated_at)
+       values (1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
+       on conflict (id) do update set
+         job_prefix = $1,
+         job_next_number = $2,
+         job_padding = $3,
+         invoice_prefix = $4,
+         invoice_next_number = $5,
+         invoice_padding = $6,
+         quote_prefix = $7,
+         quote_next_number = $8,
+         quote_padding = $9,
+         gst_percent = $10,
+         credit_risk_threshold = $11,
+         low_stock_margin = $12,
+         updated_at = now()`,
+      [
+        s.jobPrefix || "ST",
+        s.jobNextNumber || 1,
+        s.jobPadding || 4,
+        s.invoicePrefix || "INV",
+        s.invoiceNextNumber || 1,
+        s.invoicePadding || 4,
+        s.quotePrefix || "Q",
+        s.quoteNextNumber || 1,
+        s.quotePadding || 4,
+        s.gstPercent || 18,
+        s.creditRiskThreshold || 80,
+        s.lowStockMargin || 0,
+      ]
+    );
+    res.status(204).end();
+  } catch (err) {
+    console.error("Update settings error:", err);
+    res.status(500).json({ error: "Failed to save settings" });
+  }
+});
+
+// =====================================================
+// CLIENTS
+// =====================================================
+
+// GET /api/clients
+app.get("/api/clients", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `select *
+       from clients
+       order by created_at desc`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Get clients error:", err);
+    res.status(500).json({ error: "Failed to fetch clients" });
+  }
+});
+
+// POST /api/clients
+app.post("/api/clients", async (req, res) => {
+  const c = req.body || {};
+  if (!c.name) {
+    return res.status(400).json({ error: "Client name is required" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into clients
+       (code, name, gst_number, pan_number, billing_contact, billing_email, billing_phone,
+        site_contact, site_phone, credit_limit, outstanding_amount, status,
+        address_line1, address_line2, city, state, postal_code, country, industry)
+       values
+       ($1,$2,$3,$4,$5,$6,$7,
+        $8,$9,$10,$11,$12,
+        $13,$14,$15,$16,$17,$18,$19)
+       returning *`,
+      [
+        c.code || null,
+        c.name,
+        c.gst_number || null,
+        c.pan_number || null,
+        c.billing_contact || null,
+        c.billing_email || null,
+        c.billing_phone || null,
+        c.site_contact || null,
+        c.site_phone || null,
+        c.credit_limit || 0,
+        c.outstanding_amount || 0,
+        c.status || "active",
+        c.address_line1 || null,
+        c.address_line2 || null,
+        c.city || null,
+        c.state || null,
+        c.postal_code || null,
+        c.country || null,
+        c.industry || null,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create client error:", err);
+    res.status(500).json({ error: "Failed to create client" });
+  }
+});
+
+// PATCH /api/clients/:id (optional)
+app.patch("/api/clients/:id", async (req, res) => {
+  const { id } = req.params;
+  const c = req.body || {};
+  try {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    for (const [key, col] of [
+      ["name", "name"],
+      ["code", "code"],
+      ["gst_number", "gst_number"],
+      ["pan_number", "pan_number"],
+      ["billing_contact", "billing_contact"],
+      ["billing_email", "billing_email"],
+      ["billing_phone", "billing_phone"],
+      ["site_contact", "site_contact"],
+      ["site_phone", "site_phone"],
+      ["credit_limit", "credit_limit"],
+      ["outstanding_amount", "outstanding_amount"],
+      ["status", "status"],
+      ["address_line1", "address_line1"],
+      ["address_line2", "address_line2"],
+      ["city", "city"],
+      ["state", "state"],
+      ["postal_code", "postal_code"],
+      ["country", "country"],
+      ["industry", "industry"],
+    ]) {
+      if (c[key] !== undefined) {
+        fields.push(`${col} = $${idx++}`);
+        values.push(c[key]);
+      }
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    fields.push(`updated_at = now()`);
+    const sql = `update clients set ${fields.join(", ")} where id = $${idx} returning *`;
+    values.push(id);
+
+    const { rows } = await db.query(sql, values);
+    if (!rows[0]) return res.status(404).json({ error: "Client not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("Update client error:", err);
+    res.status(500).json({ error: "Failed to update client" });
+  }
+});
+
+// =====================================================
+// TECHNICIANS
+// =====================================================
+
+// GET /api/technicians
+app.get("/api/technicians", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `select *
+       from technicians
+       order by created_at desc`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Get technicians error:", err);
+    res.status(500).json({ error: "Failed to fetch technicians" });
+  }
+});
+
+// POST /api/technicians
+app.post("/api/technicians", async (req, res) => {
+  const t = req.body || {};
+  if (!t.full_name) {
+    return res.status(400).json({ error: "Technician full_name is required" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into technicians
+       (employee_code, full_name, department, designation, phone, email, status, join_date, base_salary)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       returning *`,
+      [
+        t.employee_code || null,
+        t.full_name,
+        t.department || null,
+        t.designation || null,
+        t.phone || null,
+        t.email || null,
+        t.status || "active",
+        t.join_date || null,
+        t.base_salary || 0,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create technician error:", err);
+    res.status(500).json({ error: "Failed to create technician" });
+  }
+});
+
+// PATCH /api/technicians/:id
+app.patch("/api/technicians/:id", async (req, res) => {
+  const { id } = req.params;
+  const t = req.body || {};
+  try {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    for (const [key, col] of [
+      ["employee_code", "employee_code"],
+      ["full_name", "full_name"],
+      ["department", "department"],
+      ["designation", "designation"],
+      ["phone", "phone"],
+      ["email", "email"],
+      ["status", "status"],
+      ["join_date", "join_date"],
+      ["base_salary", "base_salary"],
+    ]) {
+      if (t[key] !== undefined) {
+        fields.push(`${col} = $${idx++}`);
+        values.push(t[key]);
+      }
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    fields.push(`updated_at = now()`);
+    const sql = `update technicians set ${fields.join(", ")} where id = $${idx} returning *`;
+    values.push(id);
+
+    const { rows } = await db.query(sql, values);
+    if (!rows[0]) return res.status(404).json({ error: "Technician not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("Update technician error:", err);
+    res.status(500).json({ error: "Failed to update technician" });
+  }
+});
+
+// =====================================================
+// JOBS
+// =====================================================
+
+// GET /api/jobs
+app.get("/api/jobs", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `select j.*,
+              c.name as client_name
+       from jobs j
+       left join clients c on j.client_id = c.id
+       order by j.created_at desc`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Get jobs error:", err);
+    res.status(500).json({ error: "Failed to fetch jobs" });
+  }
+});
+
+// POST /api/jobs
+app.post("/api/jobs", async (req, res) => {
+  const j = req.body || {};
+  if (!j.job_code) {
+    return res.status(400).json({ error: "job_code is required (from frontend settings)" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into jobs
+       (job_code, client_id, client_name, machine_name, machine_serial,
+        fault_description, priority, status, assigned_technician_id,
+        is_return_job, return_reason,
+        estimated_value, material_cost, labor_hours, labor_rate, total_amount,
+        job_date, deadline)
+       values
+       ($1,$2,$3,$4,$5,
+        $6,$7,$8,$9,
+        coalesce($10,false), $11,
+        $12,$13,$14,$15,$16,
+        $17,$18)
+       returning *`,
+      [
+        j.job_code,
+        j.client_id || null,
+        j.client_name || null,
+        j.machine_name || null,
+        j.machine_serial || null,
+        j.fault_description || null,
+        (j.priority || "medium").toLowerCase(),
+        (j.status || "open").toLowerCase(),
+        j.assigned_technician_id || null,
+        j.is_return_job || false,
+        j.return_reason || null,
+        j.estimated_value || j.total_amount || 0,
+        j.material_cost || 0,
+        j.labor_hours || 0,
+        j.labor_rate || 0,
+        j.total_amount || j.estimated_value || 0,
+        j.job_date || j.inward_date || new Date().toISOString().slice(0, 10),
+        j.deadline || null,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create job error:", err);
+    res.status(500).json({ error: "Failed to create job" });
+  }
+});
+
+// PATCH /api/jobs/:id
+app.patch("/api/jobs/:id", async (req, res) => {
+  const { id } = req.params;
+  const j = req.body || {};
+
+  try {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    for (const [key, col] of [
+      ["status", "status"],
+      ["priority", "priority"],
+      ["assigned_technician_id", "assigned_technician_id"],
+      ["is_return_job", "is_return_job"],
+      ["return_reason", "return_reason"],
+      ["material_cost", "material_cost"],
+      ["labor_hours", "labor_hours"],
+      ["labor_rate", "labor_rate"],
+      ["total_amount", "total_amount"],
+      ["deadline", "deadline"],
+    ]) {
+      if (j[key] !== undefined) {
+        fields.push(`${col} = $${idx++}`);
+        values.push(j[key]);
+      }
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    fields.push("updated_at = now()");
+    const sql = `update jobs set ${fields.join(", ")} where id = $${idx} returning *`;
+    values.push(id);
+
+    const { rows } = await db.query(sql, values);
+    if (!rows[0]) return res.status(404).json({ error: "Job not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("Update job error:", err);
+    res.status(500).json({ error: "Failed to update job" });
+  }
+});
+
+// POST /api/jobs/:id/transfer (JobService.transferJob)
+app.post("/api/jobs/:id/transfer", async (req, res) => {
+  const { id } = req.params;
+  const { fromTechnicianId, toTechnicianId, reason } = req.body || {};
+  if (!toTechnicianId) {
+    return res.status(400).json({ error: "toTechnicianId is required" });
+  }
+
+  try {
+    await db.query("begin");
+
+    const { rows: jobRows } = await db.query(
+      "update jobs set assigned_technician_id = $1, updated_at = now() where id = $2 returning *",
+      [toTechnicianId, id]
+    );
+    const job = jobRows[0];
+    if (!job) {
+      await db.query("rollback");
+      return res.status(404).json({ error: "Job not found" });
+    }
+
+    const { rows: transferRows } = await db.query(
+      `insert into job_transfers (job_id, from_technician_id, to_technician_id, reason)
+       values ($1,$2,$3,$4)
+       returning *`,
+      [id, fromTechnicianId || null, toTechnicianId, reason || null]
+    );
+
+    await db.query("commit");
+    res.status(201).json({ job, transfer: transferRows[0] });
+  } catch (err) {
+    await db.query("rollback").catch(() => {});
+    console.error("Job transfer error:", err);
+    res.status(500).json({ error: "Failed to transfer job" });
+  }
+});
+
+// =====================================================
+// VENDORS
+// =====================================================
+
+app.get("/api/vendors", async (req, res) => {
+  try {
+    const { rows } = await db.query("select * from vendors order by created_at desc");
+    res.json(rows);
+  } catch (err) {
+    console.error("Get vendors error:", err);
+    res.status(500).json({ error: "Failed to fetch vendors" });
+  }
+});
+
+app.post("/api/vendors", async (req, res) => {
+  const v = req.body || {};
+  if (!v.name) {
+    return res.status(400).json({ error: "Vendor name is required" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into vendors
+       (name, gst_number, contact_name, email, phone, category, status,
+        address_line1, address_line2, city, state, postal_code, country)
+       values
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       returning *`,
+      [
+        v.name,
+        v.gst_number || null,
+        v.contact_name || null,
+        v.email || null,
+        v.phone || null,
+        v.category || null,
+        v.status || "active",
+        v.address_line1 || null,
+        v.address_line2 || null,
+        v.city || null,
+        v.state || null,
+        v.postal_code || null,
+        v.country || null,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create vendor error:", err);
+    res.status(500).json({ error: "Failed to create vendor" });
+  }
+});
+
+// =====================================================
+// INVENTORY
+// =====================================================
+
+// GET /api/inventory-items
+app.get("/api/inventory-items", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `select i.*, v.name as vendor_name
+       from inventory_items i
+       left join vendors v on i.vendor_id = v.id
+       order by i.created_at desc`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Get inventory items error:", err);
+    res.status(500).json({ error: "Failed to fetch inventory items" });
+  }
+});
+
+// POST /api/inventory-items (add / update stock)
+app.post("/api/inventory-items", async (req, res) => {
+  const i = req.body || {};
+  if (!i.part_number && !i.description) {
+    return res.status(400).json({ error: "part_number or description required" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into inventory_items
+       (part_number, description, category, unit, current_stock, min_level, location, vendor_id)
+       values
+       ($1,$2,$3,$4,$5,$6,$7,$8)
+       returning *`,
+      [
+        i.part_number || null,
+        i.description || null,
+        i.category || null,
+        i.unit || null,
+        i.current_stock || 0,
+        i.min_level || 0,
+        i.location || null,
+        i.vendor_id || null,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create inventory item error:", err);
+    res.status(500).json({ error: "Failed to create inventory item" });
+  }
+});
+
+// POST /api/inventory/usage – log usage & decrease stock
+app.post("/api/inventory/usage", async (req, res) => {
+  const { job_id, item_id, quantity, note } = req.body || {};
+  if (!item_id || !quantity || quantity <= 0) {
+    return res.status(400).json({ error: "item_id and positive quantity required" });
+  }
+
+  try {
+    await db.query("begin");
+
+    const { rows: currentRows } = await db.query(
+      "select current_stock from inventory_items where id = $1 for update",
+      [item_id]
+    );
+    const current = currentRows[0];
+    if (!current) {
+      await db.query("rollback");
+      return res.status(404).json({ error: "Inventory item not found" });
+    }
+
+    const newStock = Number(current.current_stock) - Number(quantity);
+    if (newStock < 0) {
+      // Still allow negative, but you could block here
+    }
+
+    await db.query(
+      "update inventory_items set current_stock = $1, updated_at = now() where id = $2",
+      [newStock, item_id]
+    );
+
+    const { rows: movementRows } = await db.query(
+      `insert into stock_movements
+       (item_id, job_id, movement_type, quantity, note)
+       values ($1,$2,'out',$3,$4)
+       returning *`,
+      [item_id, job_id || null, quantity, note || null]
+    );
+
+    await db.query("commit");
+    res.status(201).json(movementRows[0]);
+  } catch (err) {
+    await db.query("rollback").catch(() => {});
+    console.error("Inventory usage error:", err);
+    res.status(500).json({ error: "Failed to log inventory usage" });
+  }
+});
+
+// =====================================================
+// EXPENSES
+// =====================================================
+
+app.get("/api/expenses", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      "select * from expenses order by exp_date desc, created_at desc"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Get expenses error:", err);
+    res.status(500).json({ error: "Failed to fetch expenses" });
+  }
+});
+
+app.post("/api/expenses", async (req, res) => {
+  const e = req.body || {};
+  if (!e.exp_type || !e.amount) {
+    return res.status(400).json({ error: "exp_type and amount are required" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into expenses
+       (exp_date, exp_type, amount, job_ref, notes)
+       values ($1,$2,$3,$4,$5)
+       returning *`,
+      [
+        e.exp_date || new Date().toISOString().slice(0, 10),
+        e.exp_type,
+        e.amount,
+        e.job_ref || null,
+        e.notes || null,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create expense error:", err);
+    res.status(500).json({ error: "Failed to create expense" });
+  }
+});
+
+app.delete("/api/expenses/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    await db.query("delete from expenses where id = $1", [id]);
+    res.status(204).end();
+  } catch (err) {
+    console.error("Delete expense error:", err);
+    res.status(500).json({ error: "Failed to delete expense" });
+  }
+});
+
+// =====================================================
+// INVOICES
+// =====================================================
+
+app.get("/api/invoices", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      "select * from invoices order by issue_date desc, created_at desc"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Get invoices error:", err);
+    res.status(500).json({ error: "Failed to fetch invoices" });
+  }
+});
+
+app.post("/api/invoices", async (req, res) => {
+  const i = req.body || {};
+  if (!i.invoice_number || !i.subtotal || !i.total) {
+    return res
+      .status(400)
+      .json({ error: "invoice_number, subtotal and total are required" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into invoices
+       (invoice_number, job_id, client_id, client_name, client_address,
+        subtotal, tax_amount, total, status, issue_date, due_date, notes)
+       values
+       ($1,$2,$3,$4,$5,
+        $6,$7,$8,$9,$10,$11,$12)
+       returning *`,
+      [
+        i.invoice_number,
+        i.job_id || null,
+        i.client_id || null,
+        i.client_name || null,
+        i.client_address || null,
+        i.subtotal,
+        i.tax_amount || 0,
+        i.total,
+        (i.status || "unpaid").toLowerCase(),
+        i.issue_date || new Date().toISOString().slice(0, 10),
+        i.due_date || null,
+        i.notes || null,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create invoice error:", err);
+    res.status(500).json({ error: "Failed to create invoice" });
+  }
+});
+
+// PATCH /api/invoices/:idOrNumber
+// Frontend passes invoiceNumber (string)
+app.patch("/api/invoices/:id", async (req, res) => {
+  const { id } = req.params;
+  const i = req.body || {};
+
+  try {
+    const fields = [];
+    const values = [];
+    let idx = 1;
+
+    for (const [key, col] of [
+      ["status", "status"],
+      ["subtotal", "subtotal"],
+      ["tax_amount", "tax_amount"],
+      ["total", "total"],
+      ["notes", "notes"],
+    ]) {
+      if (i[key] !== undefined) {
+        fields.push(`${col} = $${idx++}`);
+        values.push(i[key]);
+      }
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: "No fields to update" });
+    }
+
+    fields.push("updated_at = now()");
+    const sql = `update invoices set ${fields.join(
+      ", "
+    )} where invoice_number = $${idx} or id::text = $${idx} returning *`;
+    values.push(id);
+
+    const { rows } = await db.query(sql, values);
+    if (!rows[0]) return res.status(404).json({ error: "Invoice not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("Update invoice error:", err);
+    res.status(500).json({ error: "Failed to update invoice" });
+  }
+});
+
+// =====================================================
+// QUOTATIONS
+// =====================================================
+
+// GET /api/quotations
+app.get("/api/quotations", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `select q.*,
+              c.name as client_name_db
+       from quotations q
+       left join clients c on q.client_id = c.id
+       order by q.created_at desc`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error("Get quotations error:", err);
+    res.status(500).json({ error: "Failed to fetch quotations" });
+  }
+});
+
+// POST /api/quotations (header + items)
+app.post("/api/quotations", async (req, res) => {
+  const { client_id, valid_until, subtotal, tax_amount, total, status, notes, items, provisional_quote_number } =
+    req.body || {};
+
+  if (!client_id || !Array.isArray(items) || items.length === 0) {
+    return res
+      .status(400)
+      .json({ error: "client_id and at least one item are required" });
+  }
+
+  try {
+    await db.query("begin");
+
+    // Generate quote_number if not provided
+    let quoteNumber = provisional_quote_number || null;
+    if (!quoteNumber) {
+      const { rows: sRows } = await db.query(
+        "select quote_prefix, quote_next_number, quote_padding from settings where id = 1"
+      );
+      const s = sRows[0] || {
+        quote_prefix: "Q",
+        quote_next_number: 1,
+        quote_padding: 4,
+      };
+      const padded = String(s.quote_next_number).padStart(
+        s.quote_padding || 4,
+        "0"
+      );
+      quoteNumber = `${s.quote_prefix || "Q"}-${padded}`;
+      await db.query(
+        "update settings set quote_next_number = quote_next_number + 1, updated_at = now() where id = 1"
+      );
+    }
+
+    const { rows: clientRows } = await db.query(
+      "select name from clients where id = $1",
+      [client_id]
+    );
+    const clientName = clientRows[0]?.name || null;
+
+    const { rows: qRows } = await db.query(
+      `insert into quotations
+       (quote_number, client_id, client_name, valid_until,
+        subtotal, tax_amount, total, status, notes)
+       values
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       returning *`,
+      [
+        quoteNumber,
+        client_id,
+        clientName,
+        valid_until || null,
+        subtotal || 0,
+        tax_amount || 0,
+        total || 0,
+        (status || "sent").toLowerCase(),
+        notes || null,
+      ]
+    );
+    const quotation = qRows[0];
+
+    for (const item of items) {
+      await db.query(
+        `insert into quotation_items
+         (quotation_id, description, qty, rate, amount)
+         values ($1,$2,$3,$4,$5)`,
+        [
+          quotation.id,
+          item.description || "Item",
+          item.qty || 1,
+          item.rate || 0,
+          item.amount || 0,
+        ]
+      );
+    }
+
+    await db.query("commit");
+    res.status(201).json(quotation);
+  } catch (err) {
+    await db.query("rollback").catch(() => {});
+    console.error("Create quotation error:", err);
+    res.status(500).json({ error: "Failed to create quotation" });
+  }
+});
+
+// PATCH /api/quotations/:id – change status
+app.patch("/api/quotations/:id", async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body || {};
+  if (!status) return res.status(400).json({ error: "status is required" });
+
+  try {
+    const { rows } = await db.query(
+      `update quotations
+       set status = $1, updated_at = now()
+       where id = $2 or quote_number = $2
+       returning *`,
+      [(status || "draft").toLowerCase(), id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Quotation not found" });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("Update quotation error:", err);
+    res.status(500).json({ error: "Failed to update quotation" });
+  }
+});
+
+// =====================================================
+// HR DOCS
+// =====================================================
+
+// GET /api/hr-docs?erp_user_id=...&technician_id=...
+app.get("/api/hr-docs", async (req, res) => {
+  const { erp_user_id, technician_id } = req.query;
+  try {
+    const params = [];
+    const conds = [];
+
+    if (erp_user_id) {
+      params.push(erp_user_id);
+      conds.push(`erp_user_id = $${params.length}`);
+    }
+    if (technician_id) {
+      params.push(technician_id);
+      conds.push(`technician_id = $${params.length}`);
+    }
+
+    let sql = "select * from hr_docs";
+    if (conds.length > 0) {
+      sql += " where " + conds.join(" and ");
+    }
+    sql += " order by created_at desc";
+
+    const { rows } = await db.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error("Get hr_docs error:", err);
+    res.status(500).json({ error: "Failed to fetch HR docs" });
+  }
+});
+
+// POST /api/hr-docs
+app.post("/api/hr-docs", async (req, res) => {
+  const d = req.body || {};
+  if (!d.doc_type || !d.doc_name) {
+    return res
+      .status(400)
+      .json({ error: "doc_type and doc_name are required" });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `insert into hr_docs
+       (erp_user_id, technician_id, doc_type, doc_name, doc_number,
+        issue_date, expiry_date, status, notes)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       returning *`,
+      [
+        d.erp_user_id || null,
+        d.technician_id || null,
+        d.doc_type,
+        d.doc_name,
+        d.doc_number || null,
+        d.issue_date || null,
+        d.expiry_date || null,
+        d.status || null,
+        d.notes || null,
+      ]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error("Create hr_doc error:", err);
+    res.status(500).json({ error: "Failed to create HR doc" });
+  }
+});
+
+// =====================================================
+// PAYROLL
+// =====================================================
+
+// GET /api/payroll?month=&year=
+app.get("/api/payroll", async (req, res) => {
+  const month = parseInt(req.query.month, 10);
+  const year = parseInt(req.query.year, 10);
+  if (!year || !month) {
+    return res.status(400).json({ error: "month and year are required" });
+  }
+
+  try {
+    const { rows: runRows } = await db.query(
+      "select * from payroll_runs where year = $1 and month = $2",
+      [year, month]
+    );
+    const run = runRows[0] || null;
+
+    let entries = [];
+    if (run) {
+      const { rows: eRows } = await db.query(
+        "select * from payroll_entries where payroll_run_id = $1",
+        [run.id]
+      );
+      entries = eRows;
+    }
+
+    res.json({ run, entries });
+  } catch (err) {
+    console.error("Get payroll error:", err);
+    res.status(500).json({ error: "Failed to fetch payroll" });
+  }
+});
+
+// POST /api/payroll/generate-run { month, year }
+// Uses technicians.base_salary, zero bonus/deductions initially
+app.post("/api/payroll/generate-run", async (req, res) => {
+  const month = parseInt(req.body?.month, 10);
+  const year = parseInt(req.body?.year, 10);
+  if (!year || !month) {
+    return res.status(400).json({ error: "month and year are required" });
+  }
+
+  try {
+    await db.query("begin");
+
+    const { rows: runRows } = await db.query(
+      `insert into payroll_runs (year, month, status)
+       values ($1,$2,'generated')
+       on conflict (year, month) do update
+         set status = 'generated', created_at = now()
+       returning *`,
+      [year, month]
+    );
+    const run = runRows[0];
+
+    await db.query("delete from payroll_entries where payroll_run_id = $1", [
+      run.id,
+    ]);
+
+    const { rows: techRows } = await db.query(
+      "select * from technicians where status = 'active'"
+    );
+
+    const entries = [];
+    for (const t of techRows) {
+      const base = Number(t.base_salary || 0);
+      const bonus = 0;
+      const deductions = 0;
+      const net = base + bonus - deductions;
+
+      const { rows: eRows } = await db.query(
+        `insert into payroll_entries
+         (payroll_run_id, technician_id, employee_code, name,
+          base_salary, bonus, deductions, net_pay)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)
+         returning *`,
+        [
+          run.id,
+          t.id,
+          t.employee_code || null,
+          t.full_name || null,
+          base,
+          bonus,
+          deductions,
+          net,
+        ]
+      );
+      entries.push(eRows[0]);
+    }
+
+    await db.query("commit");
+    res.json({ run, entries });
+  } catch (err) {
+    await db.query("rollback").catch(() => {});
+    console.error("Generate payroll error:", err);
+    res.status(500).json({ error: "Failed to generate payroll" });
+  }
+});
+
+// For reports page: /api/payroll/entries?year=YYYY[&month=MM]
+app.get("/api/payroll/entries", async (req, res) => {
+  const year = parseInt(req.query.year, 10);
+  const month = req.query.month ? parseInt(req.query.month, 10) : null;
+  if (!year) return res.status(400).json({ error: "year is required" });
+
+  try {
+    let sql =
+      "select pe.* from payroll_entries pe join payroll_runs pr on pe.payroll_run_id = pr.id where pr.year = $1";
+    const params = [year];
+    if (month) {
+      sql += " and pr.month = $2";
+      params.push(month);
+    }
+    const { rows } = await db.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error("Get payroll entries error:", err);
+    res.status(500).json({ error: "Failed to fetch payroll entries" });
   }
 });
 
@@ -2070,5 +1380,5 @@ app.post("/api/util/hash", async (req, res) => {
 // =====================================================
 
 app.listen(PORT, () => {
-  console.log(`🚀 Service Pro ERP backend listening on port ${PORT}`);
+  console.log(`Service Pro ERP backend running on port ${PORT}`);
 });
