@@ -114,22 +114,60 @@ app.get("/", (req, res) => {
 
 // POST /api/login
 app.post("/api/login", async (req, res) => {
-  const { email, password } = req.body || {};
+  let { email, password } = req.body || {};
+
   if (!email || !password) {
     return res.status(400).json({ error: "Email and password are required" });
   }
 
+  // Normalize email
+  email = String(email).trim();
+  const emailNorm = email.toLowerCase();
+
   try {
-    const { rows } = await db.query(
+    // 1) Try to load user by email
+    let { rows } = await db.query(
       "select * from erp_users where lower(email) = lower($1)",
-      [email]
+      [emailNorm]
     );
-    const user = rows[0];
-    if (!user) {
-      return res.status(401).json({ error: "Invalid credentials" });
+    let user = rows[0] || null;
+
+    // 2) SUPERADMIN FALLBACK: create/update if missing and using default credentials
+    if (!user && emailNorm === "superadmin@example.com" && password === "admin123") {
+      console.warn(
+        "Superadmin not found, creating via fallback login – change password in UI ASAP."
+      );
+      const hash = await bcrypt.hash(password, 10);
+
+      ({ rows } = await db.query(
+        `insert into erp_users
+         (email, password_hash, full_name, role, department,
+          allowed_modules, denied_modules, is_active)
+         values ($1,$2,$3,$4,$5,$6,$7,true)
+         on conflict (email) do update set
+           full_name = EXCLUDED.full_name,
+           role = EXCLUDED.role,
+           is_active = true
+         returning *`,
+        [
+          emailNorm,
+          hash,
+          "Super Admin",
+          "Superadmin",
+          null,
+          [],
+          [],
+        ]
+      ));
+      user = rows[0];
     }
 
-    // First try normal bcrypt check
+    // If still no user -> invalid
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials (L1)" });
+    }
+
+    // 3) Normal bcrypt check
     let ok = false;
     if (user.password_hash) {
       try {
@@ -140,12 +178,8 @@ app.post("/api/login", async (req, res) => {
       }
     }
 
-    // TEMPORARY fallback: allow known superadmin login even if hash is weird
-    if (
-      !ok &&
-      email.toLowerCase() === "superadmin@example.com" &&
-      password === "admin123"
-    ) {
+    // 4) EXTRA SUPERADMIN FALLBACK (hash weird/null but credentials match)
+    if (!ok && emailNorm === "superadmin@example.com" && password === "admin123") {
       console.warn(
         "Using superadmin fallback login – please change password in UI ASAP."
       );
@@ -153,7 +187,7 @@ app.post("/api/login", async (req, res) => {
     }
 
     if (!ok) {
-      return res.status(401).json({ error: "Invalid credentials" });
+      return res.status(401).json({ error: "Invalid credentials (L2)" });
     }
 
     if (user.is_active === false) {
